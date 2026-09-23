@@ -6,6 +6,7 @@ import hashlib
 import logging
 import os
 from collections import deque
+from dataclasses import dataclass
 
 import tweepy
 
@@ -35,6 +36,17 @@ def _build_client() -> tweepy.Client:
     )
 
 
+@dataclass(frozen=True)
+class Tweet:
+    """A qualifying on-chain message ready to be posted, with its context."""
+
+    message: str
+    url: str
+    lang: str
+    chain: str
+    tx_hash: str
+
+
 class TwitterPoster:
     def __init__(self) -> None:
         self._client = _build_client()
@@ -56,7 +68,7 @@ class TwitterPoster:
             message = message[: max_msg - 1] + "…"
         return f"{message}\n\n{url}"
 
-    def post(self, message: str, url: str, lang: str, chain: str, tx_hash: str) -> bool:
+    def post(self, tweet: Tweet) -> bool:
         """
         Post a tweet. Returns True if posted, False if skipped (duplicate or limit reached).
         """
@@ -64,18 +76,18 @@ class TwitterPoster:
             logger.warning("Monthly tweet limit reached — skipping post.")
             return False
 
-        if self._is_duplicate(message):
-            logger.debug(f"Duplicate message skipped: {message[:60]!r}")
+        if self._is_duplicate(tweet.message):
+            logger.debug(f"Duplicate message skipped: {tweet.message[:60]!r}")
             return False
 
-        tweet_text = self._format_tweet(message, url)
+        tweet_text = self._format_tweet(tweet.message, tweet.url)
 
         try:
             self._client.create_tweet(text=tweet_text)
             self._tweet_count += 1
             logger.info(
-                f"[{chain}] Tweeted ({lang}) tx={tx_hash[:12]}… "
-                f"[{self._tweet_count}/{MONTHLY_TWEET_LIMIT}]: {message[:60]!r}"
+                f"[{tweet.chain}] Tweeted ({tweet.lang}) tx={tweet.tx_hash[:12]}… "
+                f"[{self._tweet_count}/{MONTHLY_TWEET_LIMIT}]: {tweet.message[:60]!r}"
             )
             if self._tweet_count >= WARN_AT:
                 logger.warning(
