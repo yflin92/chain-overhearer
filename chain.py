@@ -7,7 +7,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncIterator, Iterator
 
 from web3 import AsyncWeb3
 from web3.providers import AsyncHTTPProvider
@@ -44,6 +44,26 @@ def _save_state(state: dict) -> None:
     STATE_FILE.write_text(json.dumps(state, indent=2))
 
 
+def _resolve_start(chain_name: str, start_block: int | None, state: dict) -> int | None:
+    """Determine the last processed block, honoring an explicit start override."""
+    if start_block is not None:
+        logger.info(f"[{chain_name}] Starting poller from block {start_block} (override)")
+        return start_block - 1
+
+    last_block = state.get(chain_name)
+    logger.info(f"[{chain_name}] Starting poller (last block: {last_block})")
+    return last_block
+
+
+def _iter_calldata(chain_name: str, block) -> Iterator[tuple[str, str, bytes]]:
+    """Yield (tx_hash, chain_name, calldata) for each transaction carrying calldata."""
+    for tx in block.transactions:
+        calldata: bytes = tx.get("input", b"") or b""
+        if not calldata:
+            continue
+        yield tx["hash"].hex(), chain_name, calldata
+
+
 async def poll_chain(
     chain_name: str,
     start_block: int | None = None,
@@ -63,13 +83,7 @@ async def poll_chain(
     w3 = AsyncWeb3(AsyncHTTPProvider(rpc_url))
 
     state = _load_state()
-
-    if start_block is not None:
-        last_block: int | None = start_block - 1
-        logger.info(f"[{chain_name}] Starting poller from block {start_block} (override)")
-    else:
-        last_block = state.get(chain_name)
-        logger.info(f"[{chain_name}] Starting poller (last block: {last_block})")
+    last_block = _resolve_start(chain_name, start_block, state)
 
     while True:
         try:
@@ -78,22 +92,13 @@ async def poll_chain(
             if last_block is None:
                 last_block = latest - 1
 
-            if latest <= last_block:
-                await asyncio.sleep(poll_interval)
-                continue
-
             for block_num in range(last_block + 1, latest + 1):
-                try:
-                    block = await w3.eth.get_block(block_num, full_transactions=True)
-                except Exception as exc:
-                    logger.warning(f"[{chain_name}] Failed to fetch block {block_num}: {exc}")
+                block = await _fetch_block(w3, chain_name, block_num)
+                if block is None:
                     continue
 
-                for tx in block.transactions:
-                    calldata: bytes = tx.get("input", b"") or b""
-                    if calldata:
-                        tx_hash = tx["hash"].hex()
-                        yield tx_hash, chain_name, calldata
+                for item in _iter_calldata(chain_name, block):
+                    yield item
 
                 last_block = block_num
                 state[chain_name] = last_block
@@ -104,6 +109,15 @@ async def poll_chain(
             logger.error(f"[{chain_name}] Poller error: {exc}")
 
         await asyncio.sleep(poll_interval)
+
+
+async def _fetch_block(w3: AsyncWeb3, chain_name: str, block_num: int):
+    """Fetch a full block, returning None if the RPC call fails."""
+    try:
+        return await w3.eth.get_block(block_num, full_transactions=True)
+    except Exception as exc:
+        logger.warning(f"[{chain_name}] Failed to fetch block {block_num}: {exc}")
+        return None
 
 
 def explorer_url(chain_name: str, tx_hash: str) -> str:
