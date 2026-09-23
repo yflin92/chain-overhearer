@@ -7,7 +7,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import AsyncIterator, Iterator
+from typing import AsyncIterator, Callable, Iterator
 
 from web3 import AsyncWeb3
 from web3.providers import AsyncHTTPProvider
@@ -85,6 +85,14 @@ async def poll_chain(
     state = _load_state()
     last_block = _resolve_start(chain_name, start_block, state)
 
+    def commit(block_num: int) -> None:
+        """Advance and persist the poller cursor after a block is processed."""
+        nonlocal last_block
+        last_block = block_num
+        state[chain_name] = block_num
+        _save_state(state)
+        logger.info(f"[{chain_name}] Processed block {block_num}")
+
     while True:
         try:
             latest = await w3.eth.block_number
@@ -92,23 +100,40 @@ async def poll_chain(
             if last_block is None:
                 last_block = latest - 1
 
-            for block_num in range(last_block + 1, latest + 1):
-                block = await _fetch_block(w3, chain_name, block_num)
-                if block is None:
-                    continue
-
-                for item in _iter_calldata(chain_name, block):
-                    yield item
-
-                last_block = block_num
-                state[chain_name] = last_block
-                _save_state(state)
-                logger.info(f"[{chain_name}] Processed block {block_num}")
-
+            async for item in _process_blocks(
+                w3, chain_name, last_block + 1, latest + 1, commit
+            ):
+                yield item
         except Exception as exc:
             logger.error(f"[{chain_name}] Poller error: {exc}")
 
         await asyncio.sleep(poll_interval)
+
+
+async def _process_blocks(
+    w3: AsyncWeb3,
+    chain_name: str,
+    start: int,
+    stop: int,
+    commit: Callable[[int], None],
+) -> AsyncIterator[tuple[str, str, bytes]]:
+    """
+    Fetch blocks in range(start, stop) and yield each transaction's calldata as
+    a (tx_hash, chain_name, calldata) tuple.
+
+    `commit(block_num)` is invoked after each block is fully processed so the
+    caller can advance and persist its cursor. Blocks that fail to fetch are
+    skipped without committing.
+    """
+    for block_num in range(start, stop):
+        block = await _fetch_block(w3, chain_name, block_num)
+        if block is None:
+            continue
+
+        for item in _iter_calldata(chain_name, block):
+            yield item
+
+        commit(block_num)
 
 
 async def _fetch_block(w3: AsyncWeb3, chain_name: str, block_num: int):

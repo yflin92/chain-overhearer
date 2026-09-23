@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 
 from chain import CHAINS, explorer_url, poll_chain
 from detector import extract_message
-from twitter import TwitterPoster
+from twitter import Tweet, TwitterPoster
 
 load_dotenv()
 
@@ -64,7 +64,9 @@ async def process_chain(
                 f"  url     : {url}"
             )
         else:
-            poster.post(text, url, lang=lang, chain=chain, tx_hash=tx_hash)
+            poster.post(
+                Tweet(message=text, url=url, lang=lang, chain=chain, tx_hash=tx_hash)
+            )
 
 
 def parse_args() -> argparse.Namespace:
